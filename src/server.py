@@ -1,13 +1,12 @@
-"""Real-time multimodal AI demo with Gemma 4 E2B + Kokoro TTS."""
+"""Real-time multimodal AI demo with Gemma 4 E2B + Kokoro TTS (mlx-audio)."""
 
 import asyncio
 import base64
-import io
 import json
 import os
+import re
 import tempfile
 import time
-import wave
 from pathlib import Path
 
 import numpy as np
@@ -15,7 +14,6 @@ import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 
-import kokoro_onnx
 import litert_lm
 
 MODEL_PATH = os.environ.get(
@@ -29,13 +27,16 @@ SYSTEM_PROMPT = (
     "First transcribe exactly what the user said, then write your response."
 )
 
+SENTENCE_SPLIT_RE = re.compile(r'(?<=[.!?])\s+')
+
 app = FastAPI()
 engine = None
-tts = None
+tts_model = None
+tts_sample_rate = 24000
 
 
 def load_models():
-    global engine, tts
+    global engine, tts_model, tts_sample_rate
     print(f"Loading Gemma 4 E2B from {MODEL_PATH}...")
     engine = litert_lm.Engine(
         MODEL_PATH,
@@ -46,20 +47,13 @@ def load_models():
     engine.__enter__()
     print("Engine loaded.")
 
-    tts_dir = Path(__file__).parent
-    tts = kokoro_onnx.Kokoro(str(tts_dir / "kokoro-v1.0.onnx"), str(tts_dir / "voices-v1.0.bin"))
-    print("Kokoro TTS loaded.")
-
-
-def pcm_to_wav_bytes(pcm: np.ndarray, sample_rate: int) -> bytes:
-    pcm_int16 = (pcm * 32767).clip(-32768, 32767).astype(np.int16)
-    buf = io.BytesIO()
-    with wave.open(buf, "wb") as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)
-        wf.setframerate(sample_rate)
-        wf.writeframes(pcm_int16.tobytes())
-    return buf.getvalue()
+    from mlx_audio.tts.generate import load_model
+    print("Loading mlx-audio Kokoro...")
+    tts_model = load_model("mlx-community/Kokoro-82M-bf16")
+    tts_sample_rate = tts_model.sample_rate
+    # Warmup to trigger pipeline init (phonemizer, spacy, etc.)
+    list(tts_model.generate(text="Hello", voice="af_heart", speed=1.0))
+    print(f"Kokoro TTS loaded (mlx-audio, sample_rate={tts_sample_rate}).")
 
 
 def save_temp(data: bytes, suffix: str) -> str:
@@ -67,6 +61,18 @@ def save_temp(data: bytes, suffix: str) -> str:
     tmp.write(data)
     tmp.close()
     return tmp.name
+
+
+def split_sentences(text: str) -> list[str]:
+    """Split text into sentences for streaming TTS."""
+    parts = SENTENCE_SPLIT_RE.split(text.strip())
+    return [s.strip() for s in parts if s.strip()]
+
+
+def tts_sentence(text: str, voice: str = "af_heart", speed: float = 1.1) -> np.ndarray:
+    """Generate audio for a single sentence using mlx-audio."""
+    results = list(tts_model.generate(text=text, voice=voice, speed=speed))
+    return np.concatenate([np.array(r.audio) for r in results])
 
 
 @app.on_event("startup")
@@ -185,19 +191,49 @@ async def websocket_endpoint(ws: WebSocket):
                     print("Interrupted before TTS, skipping audio")
                     continue
 
-                # TTS
-                t0 = time.time()
-                wav_bytes = await asyncio.get_event_loop().run_in_executor(
-                    None, lambda: pcm_to_wav_bytes(*tts.create(text_response, voice="af_heart", speed=1.1))
-                )
-                tts_time = time.time() - t0
-                print(f"TTS ({tts_time:.2f}s): {len(wav_bytes)} bytes")
+                # Streaming TTS: split into sentences and send chunks progressively
+                sentences = split_sentences(text_response)
+                if not sentences:
+                    sentences = [text_response]
 
-                if interrupted.is_set():
-                    print("Interrupted after TTS, skipping audio send")
-                    continue
+                tts_start = time.time()
 
-                await ws.send_text(json.dumps({"type": "audio", "audio": base64.b64encode(wav_bytes).decode(), "tts_time": round(tts_time, 2)}))
+                # Signal start of audio stream
+                await ws.send_text(json.dumps({
+                    "type": "audio_start",
+                    "sample_rate": tts_sample_rate,
+                    "sentence_count": len(sentences),
+                }))
+
+                for i, sentence in enumerate(sentences):
+                    if interrupted.is_set():
+                        print(f"Interrupted during TTS (sentence {i+1}/{len(sentences)})")
+                        break
+
+                    # Generate audio for this sentence
+                    pcm = await asyncio.get_event_loop().run_in_executor(
+                        None, lambda s=sentence: tts_sentence(s)
+                    )
+
+                    if interrupted.is_set():
+                        break
+
+                    # Convert to 16-bit PCM and send as base64
+                    pcm_int16 = (pcm * 32767).clip(-32768, 32767).astype(np.int16)
+                    await ws.send_text(json.dumps({
+                        "type": "audio_chunk",
+                        "audio": base64.b64encode(pcm_int16.tobytes()).decode(),
+                        "index": i,
+                    }))
+
+                tts_time = time.time() - tts_start
+                print(f"TTS ({tts_time:.2f}s): {len(sentences)} sentences")
+
+                if not interrupted.is_set():
+                    await ws.send_text(json.dumps({
+                        "type": "audio_end",
+                        "tts_time": round(tts_time, 2),
+                    }))
 
             finally:
                 for p in [audio_path, image_path]:

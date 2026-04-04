@@ -440,6 +440,12 @@ let audioCtx, currentSource;
 let state = 'loading';
 let ignoreIncomingAudio = false;
 
+// Streaming audio playback state
+let streamSampleRate = 24000;
+let streamNextTime = 0;         // When to schedule next chunk
+let streamSources = [];         // Active AudioBufferSourceNodes
+let streamTtsTime = null;
+
 // ── Waveform Visualizer ──
 let analyser, micSource;
 const BAR_COUNT = 40;
@@ -596,13 +602,23 @@ function connect() {
         }
       }
       addMessage('assistant', msg.text, `LLM ${msg.llm_time}s`);
-    } else if (msg.type === 'audio') {
+    } else if (msg.type === 'audio_start') {
+      if (ignoreIncomingAudio) return;
+      streamSampleRate = msg.sample_rate || 24000;
+      startStreamPlayback();
+    } else if (msg.type === 'audio_chunk') {
+      if (ignoreIncomingAudio) return;
+      queueAudioChunk(msg.audio);
+    } else if (msg.type === 'audio_end') {
       if (ignoreIncomingAudio) {
         ignoreIncomingAudio = false;
+        stopPlayback();
         setState('listening');
         return;
       }
-      playAudio(msg.audio, msg.tts_time);
+      streamTtsTime = msg.tts_time;
+      const meta = messagesDiv.querySelector('.msg.assistant:last-child .meta');
+      if (meta) meta.textContent += ` · TTS ${msg.tts_time}s`;
     }
   };
 }
@@ -686,12 +702,14 @@ function float32ToWavBase64(samples) {
   return btoa(bin);
 }
 
-// ── Playback ──
+// ── Streaming Playback ──
 function stopPlayback() {
-  if (currentSource) {
-    try { currentSource.stop(); } catch {}
-    currentSource = null;
+  for (const src of streamSources) {
+    try { src.stop(); } catch {}
   }
+  streamSources = [];
+  currentSource = null;
+  streamNextTime = 0;
 }
 
 function ensureAudioCtx() {
@@ -703,37 +721,53 @@ function ensureAudioCtx() {
   }
 }
 
-async function playAudio(base64Wav, ttsTime) {
+function startStreamPlayback() {
   stopPlayback();
   ensureAudioCtx();
-  if (audioCtx.state === 'suspended') await audioCtx.resume();
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+  streamNextTime = audioCtx.currentTime + 0.05; // Small initial buffer
+  setState('speaking');
+}
 
-  const bin = atob(base64Wav);
+function queueAudioChunk(base64Pcm) {
+  ensureAudioCtx();
+
+  // Decode base64 -> Int16 PCM -> Float32
+  const bin = atob(base64Pcm);
   const bytes = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  const int16 = new Int16Array(bytes.buffer);
+  const float32 = new Float32Array(int16.length);
+  for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768;
 
-  const audioBuffer = await audioCtx.decodeAudioData(bytes.buffer.slice(0));
+  // Create AudioBuffer and schedule it
+  const audioBuffer = audioCtx.createBuffer(1, float32.length, streamSampleRate);
+  audioBuffer.getChannelData(0).set(float32);
+
   const source = audioCtx.createBufferSource();
   source.buffer = audioBuffer;
-
-  // Route to speakers directly, and tap analyser for visualization (not chained to destination)
   source.connect(audioCtx.destination);
   source.connect(analyser);
 
-  source.start();
-  currentSource = source;
-  setState('speaking');
+  // Schedule gapless playback
+  const startAt = Math.max(streamNextTime, audioCtx.currentTime);
+  source.start(startAt);
+  streamNextTime = startAt + audioBuffer.duration;
 
+  streamSources.push(source);
+  currentSource = source;
+
+  // Clean up when this chunk finishes
   source.onended = () => {
-    currentSource = null;
-    if (state === 'speaking') {
+    const idx = streamSources.indexOf(source);
+    if (idx !== -1) streamSources.splice(idx, 1);
+    // If this was the last chunk and no more are queued, return to listening
+    if (streamSources.length === 0 && state === 'speaking') {
+      currentSource = null;
       setState('listening');
       setStatus('connected', 'Connected');
     }
   };
-
-  const meta = messagesDiv.querySelector('.msg.assistant:last-child .meta');
-  if (meta) meta.textContent += ` · TTS ${ttsTime}s`;
 }
 
 // ── UI ──

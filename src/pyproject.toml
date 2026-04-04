@@ -6,8 +6,10 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.135.3",
-    "kokoro-onnx>=0.5.0",
     "litert-lm>=0.10.1",
+    "misaki[en]>=0.9.4",
+    "mlx-audio>=0.4.2",
+    "num2words>=0.5.14",
     "numpy>=2.4.4",
     "soundfile>=0.13.1",
     "uvicorn[standard]>=0.43.0",
