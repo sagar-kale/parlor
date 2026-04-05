@@ -595,7 +595,7 @@ function setState(newState) {
 
   // Raise VAD threshold during speaking to reduce echo false triggers
   if (myvad) {
-    myvad.setOptions({ positiveSpeechThreshold: newState === 'speaking' ? 0.8 : 0.5 });
+    myvad.setOptions({ positiveSpeechThreshold: newState === 'speaking' ? 0.92 : 0.5 });
   }
 
   // Connect/disconnect mic analyser based on state
@@ -686,8 +686,16 @@ function captureFrame() {
 }
 
 // ── VAD Handlers ──
+let speakingStartedAt = 0;
+const BARGE_IN_GRACE_MS = 800; // Ignore VAD triggers shortly after TTS starts (echo)
+
 function handleSpeechStart() {
   if (state === 'speaking') {
+    // Ignore echo: don't allow barge-in right after TTS starts playing
+    if (Date.now() - speakingStartedAt < BARGE_IN_GRACE_MS) {
+      console.log('Barge-in suppressed (echo grace period)');
+      return;
+    }
     stopPlayback();
     ignoreIncomingAudio = true;
     if (ws && ws.readyState === WebSocket.OPEN) {
@@ -756,6 +764,7 @@ function startStreamPlayback() {
   ensureAudioCtx();
   if (audioCtx.state === 'suspended') audioCtx.resume();
   streamNextTime = audioCtx.currentTime + 0.05; // Small initial buffer
+  speakingStartedAt = Date.now();
   setState('speaking');
 }
 
