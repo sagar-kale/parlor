@@ -91,11 +91,34 @@
   }
 
   .logo h1 {
-    font-family: var(--font-display);
+    font-family: var(--font-body);
     font-size: 20px;
-    font-weight: 800;
+    font-weight: 600;
     color: var(--c-text-bright);
-    letter-spacing: -0.02em;
+    letter-spacing: 0.01em;
+  }
+
+  .model-label {
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--c-text-dim);
+    letter-spacing: 0.03em;
+  }
+
+  .on-device-pill {
+    font-size: 10px;
+    font-weight: 500;
+    color: var(--c-text-dim);
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .on-device-pill svg {
+    width: 10px;
+    height: 10px;
   }
 
   .status-pill {
@@ -304,6 +327,29 @@
     letter-spacing: 0.02em;
   }
 
+  .loading-dots {
+    display: inline-flex;
+    gap: 4px;
+    align-items: center;
+    height: 1.55em;
+  }
+
+  .loading-dots span {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: rgba(74,222,128,0.5);
+    animation: dot-bounce 1.2s ease-in-out infinite;
+  }
+
+  .loading-dots span:nth-child(2) { animation-delay: 0.15s; }
+  .loading-dots span:nth-child(3) { animation-delay: 0.3s; }
+
+  @keyframes dot-bounce {
+    0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
+    30% { opacity: 1; transform: translateY(-4px); }
+  }
+
   /* ── Controls bar ── */
   .controls {
     width: 100%;
@@ -365,23 +411,6 @@
     50% { opacity: 0.4; transform: scale(0.8); }
   }
 
-  .badge {
-    font-size: 10px;
-    font-weight: 600;
-    color: var(--c-text-dim);
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    opacity: 0.5;
-    display: flex;
-    align-items: center;
-    gap: 5px;
-  }
-
-  .badge svg {
-    width: 12px;
-    height: 12px;
-    opacity: 0.6;
-  }
 </style>
 </head>
 <body>
@@ -391,6 +420,7 @@
     <div class="logo-mark"></div>
     <h1>Parlor</h1>
   </div>
+  <span class="model-label">Gemma 4 E2B</span>
   <div id="status" class="status-pill disconnected">Disconnected</div>
 </header>
 
@@ -416,10 +446,10 @@
       <div id="stateDot" class="dot loading"></div>
       <span id="stateText">Loading...</span>
     </div>
-    <div class="badge">
+    <span class="on-device-pill">
       <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="4" width="12" height="9" rx="2"/><path d="M5 4V3a3 3 0 0 1 6 0v1"/></svg>
       On-device
-    </div>
+    </span>
   </div>
 </div>
 
@@ -677,7 +707,7 @@ function handleSpeechEnd(audio) {
 
   setState('processing');
   setStatus('processing', 'Processing');
-  addMessage('user', '(voice message)', imageBase64 ? 'with camera' : '');
+  addMessage('user', '<span class="loading-dots"><span></span><span></span><span></span></span>', imageBase64 ? 'with camera' : '');
 
   const payload = { audio: wavBase64 };
   if (imageBase64) payload.image = imageBase64;
